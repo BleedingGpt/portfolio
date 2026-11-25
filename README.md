@@ -2,7 +2,7 @@
 
 A single-page, **zero-backend** portfolio. Static HTML + CSS + JavaScript only.
 
-The hero is built live in front of the visitor by three coloured cursors (SOUL, RPA, CoreFlow): they drag selection frames with live measurements, switch to an I-beam and type headings, then rest. Everything below the hero reveals on scroll.
+Every section is built live in front of the visitor by three coloured cursors (SOUL, RPA, CoreFlow): they drag selection frames with live measurements, switch to an I-beam and type headings, then rest. The hero builds on load; each following section builds as it scrolls into view.
 
 ## Run locally
 
@@ -29,6 +29,10 @@ npm i -g vercel
 vercel login
 vercel --prod
 ```
+
+## Theme
+
+Light premium theme: soft aurora, glass cards, grid and grain on a white canvas. This intentionally overrides the earlier dark "premium 10k" default.
 
 ## Why no backend
 

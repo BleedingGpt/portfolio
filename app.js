@@ -12,13 +12,27 @@
   const measure = document.getElementById('measure');
   const gv = document.getElementById('gv');
   const gh = document.getElementById('gh');
-  const typeEls = [...document.querySelectorAll('[data-build="type"]')];
-  const frameEls = [...document.querySelectorAll('[data-build="frame"]')];
-  let skip = false, running = false;
 
-  const fullText = new Map(typeEls.map(el => [el, el.dataset.text || el.textContent]));
-  const fullHTML = new Map(typeEls.map(el => [el, el.innerHTML]));
-  typeEls.forEach(el => el.setAttribute('aria-label', fullText.get(el)));
+  // Snapshot every build target BEFORE anything is hidden or emptied.
+  const targets = [...document.querySelectorAll('[data-build]')].map(el => ({
+    el,
+    html: el.innerHTML,
+    text: el.dataset.text || el.textContent,
+    type: el.dataset.build === 'type',
+    owner: el.dataset.owner || 'soul'
+  }));
+  targets.forEach(t => t.el.setAttribute('aria-label', t.text));
+
+  const groups = new Map();
+  targets.forEach(t => {
+    const sec = t.el.closest('section') || document.body;
+    if (!groups.has(sec)) groups.set(sec, []);
+    groups.get(sec).push(t);
+  });
+
+  let skip = false, building = false, idleTimer = null;
+  const queue = [];
+  const built = new Set();
 
   // Reveal k characters while keeping em / strong / gradient markup intact.
   function partialHTML(html, k){
@@ -66,17 +80,21 @@
   function place(el, x, y){ el.style.transform = `translate(${x}px,${y}px)`; }
   function shape(el, name){ el.classList.remove('arrow', 'cross', 'ibeam'); el.classList.add(name); }
   function tag(el, on){ el.querySelector('.tag').classList.toggle('show', on); }
+  function showCursors(){ clearTimeout(idleTimer); Object.values(cursors).forEach(c => { c.style.opacity = '1'; }); }
+  function idleFade(){ clearTimeout(idleTimer); idleTimer = setTimeout(() => {
+    if (!building) Object.values(cursors).forEach(c => { c.style.opacity = '0'; });
+  }, 900); }
 
-  async function moveTo(el, x, y, ms = 500){
+  async function moveTo(el, x, y, ms = 420){
     const m = new DOMMatrix(getComputedStyle(el).transform);
     const sx = m.m41, sy = m.m42;
     await animate(ms, t => place(el, sx + (x - sx) * t, sy + (y - sy) * t));
   }
 
-  async function dragFrame(el, target, ms = 900){
+  async function dragFrame(el, target, ms = 620){
     const r = target.getBoundingClientRect();
     tag(el, true); shape(el, 'arrow');
-    await moveTo(el, r.left + 8, r.top + 8, 500);
+    await moveTo(el, r.left + 8, r.top + 8, 380);
     shape(el, 'cross');
     gv.style.height = r.top + 'px'; gv.style.top = '0';
     gh.style.width = r.left + 'px'; gh.style.left = '0';
@@ -95,81 +113,90 @@
     shape(el, 'arrow');
   }
 
-  async function typeLine(el, target, ms = 1100){
-    const text = fullText.get(target);
+  async function typeLine(el, target, html, text, ms){
     const r = target.getBoundingClientRect();
     shape(el, 'ibeam'); tag(el, true);
-    await moveTo(el, r.left + 6, r.top + Math.min(20, r.height / 3), 400);
+    await moveTo(el, r.left + 6, r.top + Math.min(20, Math.max(8, r.height / 3)), 360);
     const n = text.length;
     await animate(ms, t => {
       const k = Math.floor(t * n);
       const caret = document.createElement('span');
       caret.className = 'caret';
-      target.replaceChildren(partialHTML(fullHTML.get(target), k), caret);
+      target.replaceChildren(partialHTML(html, k), caret);
     });
-    target.innerHTML = fullHTML.get(target);
+    target.innerHTML = html;
     tag(el, false);
   }
 
-  function reset(){
-    skip = false;
-    document.body.classList.add('building');
-    typeEls.forEach(el => el.replaceChildren());
-    frameEls.forEach(el => { el.style.clipPath = 'inset(0 100% 0 0)'; });
-    Object.entries(cursors).forEach(([name, el], i) => {
-      place(el, innerWidth * .5 + (i - 1) * 110, -60);
-      shape(el, 'arrow'); tag(el, false); el.style.opacity = '1';
+  function hideAll(){
+    targets.forEach(t => {
+      if (t.type) t.el.replaceChildren();
+      else t.el.style.clipPath = 'inset(0 100% 0 0)';
     });
-    measure.classList.remove('show'); gv.classList.remove('show'); gh.classList.remove('show');
   }
 
   function finish(){
     skip = true;
-    document.body.classList.remove('building');
-    frameEls.forEach(el => { el.style.clipPath = 'none'; });
-    typeEls.forEach(el => { el.innerHTML = fullHTML.get(el); });
-    Object.values(cursors).forEach(el => { el.style.opacity = '0'; });
+    targets.forEach(t => {
+      t.el.style.clipPath = 'none';
+      t.el.innerHTML = t.html;
+    });
+    Object.values(cursors).forEach(c => { c.style.opacity = '0'; });
     measure.classList.remove('show'); gv.classList.remove('show'); gh.classList.remove('show');
-    running = false;
+    queue.length = 0; building = false;
   }
 
-  async function build(){
-    if (running) return;
-    if (reduced || !finePointer){ finish(); return; }
-    reset(); running = true;
-    await wait(260);
-    await dragFrame(cursors.soul, document.querySelector('.eyebrow'), 740);
-    await wait(120);
-    await dragFrame(cursors.rpa, document.querySelector('.stats'), 1000);
-    await wait(140);
-    await typeLine(cursors.soul, typeEls[0], 1150);
-    await wait(160);
-    await typeLine(cursors.coreflow, typeEls[1], 900);
-    await wait(130);
-    await dragFrame(cursors.coreflow, document.querySelector('.hero-actions'), 620);
-    await wait(120);
-    await dragFrame(cursors.soul, document.querySelector('.sign'), 560);
-    await wait(1000);
-    finish();
+  function enqueue(section){
+    if (!section || built.has(section)) return;
+    built.add(section); queue.push(section); pump();
   }
 
+  async function buildSection(section){
+    const items = groups.get(section) || [];
+    if (!items.length) return;
+    showCursors();
+    for (const t of items){
+      if (skip) break;
+      const cursor = cursors[t.owner] || cursors.soul;
+      if (t.type){
+        const ms = Math.max(420, Math.min(950, 220 + t.text.length * 16));
+        await typeLine(cursor, t.el, t.html, t.text, ms);
+      } else {
+        await dragFrame(cursor, t.el, section.id === 'hero' ? 780 : 520);
+      }
+      await wait(section.id === 'hero' ? 130 : 70);
+    }
+  }
+
+  async function pump(){
+    if (building) return;
+    building = true;
+    while (queue.length && !skip){
+      await buildSection(queue.shift());
+    }
+    building = false;
+    idleFade();
+  }
+
+  // Skip / reduced-motion / touch: show the whole page immediately.
   addEventListener('keydown', e => { if (e.key === 'Escape') finish(); });
-  addEventListener('resize', () => { if (running) finish(); });
+  addEventListener('resize', () => { if (building) finish(); });
 
-  // Reveal-on-scroll for everything below the hero.
-  const reveals = [...document.querySelectorAll('.reveal')];
-  if (!('IntersectionObserver' in window)){
-    reveals.forEach(el => el.classList.add('in'));
+  if (reduced || !finePointer){
+    finish();
   } else {
-    const io = new IntersectionObserver(entries => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting){ entry.target.classList.add('in'); io.unobserve(entry.target); }
-      });
-    }, { threshold: .12 });
-    reveals.forEach(el => io.observe(el));
-    // Safety net: never leave content invisible if an observer callback is missed.
-    setTimeout(() => reveals.forEach(el => el.classList.add('in')), 6000);
-  }
+    hideAll();
+    enqueue(document.getElementById('hero'));
 
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(build); else build();
+    const io = new IntersectionObserver(entries => {
+      entries.forEach(e => { if (e.isIntersecting){ enqueue(e.target); io.unobserve(e.target); } });
+    }, { threshold: .12, rootMargin: '0px 0px -8% 0px' });
+    document.querySelectorAll('section').forEach(s => io.observe(s));
+
+    // Safety net: never leave content hidden if a callback is missed.
+    setTimeout(() => {
+      const stuck = targets.some(t => !t.type && t.el.style.clipPath && t.el.style.clipPath !== 'none');
+      if (stuck) finish();
+    }, 18000);
+  }
 })();
